@@ -1,0 +1,116 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      let u = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return isAuthenticated()
+          && u.verified == true
+          && u.verifiedUntil > request.time;
+    }
+
+    function isAdmin() {
+      let u = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return isAuthenticated() && u.role == 'admin';
+    }
+
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function isParticipant(chatId) {
+      return request.auth.uid in
+        get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+    }
+
+    // ── users ─────────────────────────────────────────────────────────────────
+    // 본인 문서만 읽기/생성/수정 가능. 삭제 불가.
+
+    match /users/{uid} {
+      allow read, create, update: if isAuthenticated() && isOwner(uid);
+    }
+
+    // ── posts ─────────────────────────────────────────────────────────────────
+    // 인증된 기숙사생만 읽기/쓰기.
+    // 수정은 작성자 본인 or 좋아요(likes/likedBy) 필드 한정.
+
+    match /posts/{postId} {
+      // TODO: 출시 전 isAuthenticated() → isVerifiedUser() 로 복구
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+          && request.resource.data.authorUid == request.auth.uid;
+      allow update: if isAuthenticated() && (
+          resource.data.authorUid == request.auth.uid
+          || request.resource.data.diff(resource.data)
+                .affectedKeys().hasOnly(['likes', 'likedBy'])
+      );
+      allow delete: if isAuthenticated()
+          && (resource.data.authorUid == request.auth.uid || isAdmin());
+
+      match /comments/{commentId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated()
+            && request.resource.data.authorUid == request.auth.uid;
+        allow delete: if isAuthenticated()
+            && (resource.data.authorUid == request.auth.uid || isAdmin());
+      }
+    }
+
+    // ── chats ─────────────────────────────────────────────────────────────────
+    // 참여자만 채팅방과 메시지에 접근 가능.
+
+    match /chats/{chatId} {
+      allow read: if isVerifiedUser() && isParticipant(chatId);
+      allow create: if isVerifiedUser()
+          && request.auth.uid in request.resource.data.participants
+          && request.resource.data.participants.size() == 2;
+
+      match /messages/{messageId} {
+        allow read: if isVerifiedUser() && isParticipant(chatId);
+        allow create: if isVerifiedUser()
+            && isParticipant(chatId)
+            && request.resource.data.senderUid == request.auth.uid;
+      }
+    }
+
+    // ── groups ────────────────────────────────────────────────────────────────
+
+    match /groups/{groupId} {
+      allow read: if isVerifiedUser();
+      allow create: if isVerifiedUser()
+          && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isVerifiedUser() && (
+          resource.data.createdBy == request.auth.uid
+          || request.auth.uid in resource.data.members
+      );
+    }
+
+    // ── laundry ───────────────────────────────────────────────────────────────
+    // 읽기는 모두, 수정은 본인이 시작한 기기만.
+
+    match /laundry/{building}/machines/{machineId} {
+      // TODO: 출시 전 isAuthenticated() → isVerifiedUser() 로 복구
+      allow read: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+          !resource.data.inUse
+          || resource.data.startedByUid == request.auth.uid
+      );
+    }
+
+    // ── roomWish ──────────────────────────────────────────────────────────────
+
+    match /roomWish/{semester}/{building}/{roomNumber} {
+      // TODO: 출시 전 isAuthenticated() → isVerifiedUser() 로 복구
+      allow read: if isAuthenticated();
+      allow update: if isAuthenticated()
+          && request.resource.data.diff(resource.data)
+                .affectedKeys().hasOnly(['wishes']);
+    }
+  }
+}
